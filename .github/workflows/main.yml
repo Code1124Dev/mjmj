@@ -1,43 +1,94 @@
 
-name: Build APK from ZIP
+name: Build APK
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - name: 下载仓库
+        uses: actions/checkout@v4
 
-      - name: Unzip project
-        run: |
-          mkdir -p project
-          unzip TeaHackGlass_source.zip -d project
-          find project -maxdepth 3 -type f | head -50
-
-      - name: Setup Java
+      - name: 安装 Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: 安装 Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
 
-      - name: Build APK
+      - name: 设置 Android SDK
+        shell: bash
         run: |
-          cd project
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "SDK location: $ANDROID_HOME"
+
+      - name: 解压源码
+        shell: bash
+        run: |
+          mkdir -p project
+
+          ZIP=$(find . -maxdepth 3 -type f -name "*.zip" | head -1)
+
+          if [ -n "$ZIP" ]; then
+            unzip -o "$ZIP" -d project
           else
-            gradle assembleDebug
+            cp -a . project/
           fi
 
-      - name: Upload APK
+      - name: 查找项目
+        shell: bash
+        run: |
+          PROJECT=$(find project -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            | head -1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "错误：找不到 Android Gradle 项目"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$(dirname "$PROJECT")" >> "$GITHUB_ENV"
+
+      - name: 编译 APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: 收集 APK
+        shell: bash
+        run: |
+          mkdir -p output
+
+          find "$PROJECT_DIR" -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -exec cp {} output/ \;
+
+          ls -lh output/
+
+      - name: 上传 APK
         uses: actions/upload-artifact@v4
         with:
           name: TeaHackGlass-APK
-          path: project/**/build/outputs/apk/debug/*.apk
+          path: output/*.apk
+          if-no-files-found: error
