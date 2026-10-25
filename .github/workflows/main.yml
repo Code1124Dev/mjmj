@@ -1,5 +1,5 @@
 
-name: Build APK
+name: TeaHack APK Build
 
 on:
   push:
@@ -13,69 +13,125 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
-      - name: 下载仓库
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装 Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: 安装 Gradle
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
 
-      - name: 设置 Android SDK
+      - name: Setup Android SDK
         shell: bash
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "SDK location: $ANDROID_HOME"
+          set -e
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-      - name: 解压源码
-        shell: bash
-        run: |
-          mkdir -p project
-
-          ZIP=$(find . -maxdepth 3 -type f -name "*.zip" | head -1)
-
-          if [ -n "$ZIP" ]; then
-            unzip -o "$ZIP" -d project
-          else
-            cp -a . project/
-          fi
-
-      - name: 查找项目
-        shell: bash
-        run: |
-          PROJECT=$(find project -type f \
-            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-            | head -1)
-
-          if [ -z "$PROJECT" ]; then
-            echo "错误：找不到 Android Gradle 项目"
+          if [ ! -d "$SDK" ]; then
+            echo "Android SDK not found"
             exit 1
           fi
 
-          echo "PROJECT_DIR=$(dirname "$PROJECT")" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK" > local.properties
+          echo "SDK: $SDK"
 
-      - name: 编译 APK
+      - name: Extract Project
         shell: bash
         run: |
-          cd "$PROJECT_DIR"
+          set -e
+          mkdir -p extracted
 
-          if [ -f gradlew ] && [ -f gradle/wrapper/gradle-wrapper.jar ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug --no-daemon --stacktrace
+          ZIP=$(find . -maxdepth 3 -type f \
+            -iname "*.zip" \
+            ! -path "./.git/*" \
+            | head -1)
+
+          if [ -n "$ZIP" ]; then
+            echo "Extracting: $ZIP"
+            unzip -o "$ZIP" -d extracted
           else
-            gradle assembleDebug --no-daemon --stacktrace
+            echo "Using repository source"
+            cp -a . extracted/
           fi
 
-      - name: 收集 APK
+          find extracted -maxdepth 4 -type f | head -80
+
+      - name: Locate Gradle Project
+        shell: bash
+        run: |
+          set -e
+
+          FILE=$(find extracted -type f \
+            \( -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \) \
+            | head -1)
+
+          if [ -z "$FILE" ]; then
+            echo "::error::Missing settings.gradle"
+            exit 1
+          fi
+
+          DIR=$(dirname "$FILE")
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+
+          echo "Project: $DIR"
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -o pipefail
+          cd "$PROJECT_DIR"
+
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+          if [ -f gradlew ] && \
+             [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all \
+              2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          else
+            gradle assembleDebug \
+              --no-daemon \
+              --stacktrace \
+              --warning-mode all \
+              2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          fi
+
+      - name: Show Error Summary
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f build.log ]; then
+            echo "===== BUILD ERRORS ====="
+            grep -n -A 25 -B 8 \
+              -E 'What went wrong|FAILURE:|error:|Could not resolve|Could not find|Execution failed' \
+              build.log | head -250 || true
+          fi
+
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeaHack-Build-Logs
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Collect APK
+        if: success()
         shell: bash
         run: |
           mkdir -p output
@@ -84,9 +140,15 @@ jobs:
             -path "*/build/outputs/apk/debug/*.apk" \
             -exec cp {} output/ \;
 
-          ls -lh output/
+          if ! find output -name "*.apk" | grep -q .; then
+            echo "::error::No APK generated"
+            exit 1
+          fi
 
-      - name: 上传 APK
+          ls -lh output
+
+      - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: TeaHackGlass-APK
