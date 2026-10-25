@@ -1,0 +1,171 @@
+
+name: TeaHack Glass APK Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      # 1. 下载仓库
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. 安装 Java 17
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 3. 配置 Android SDK
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+          echo "Android SDK: $SDK"
+
+          if [ ! -d "$SDK" ]; then
+            echo "ERROR: Android SDK directory missing"
+            exit 1
+          fi
+
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$SDK/cmdline-tools" \
+              -name sdkmanager -type f | head -1)
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      # 4. 自动寻找 ZIP 并解压
+      - name: Extract Project ZIP
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p extracted
+
+          ZIP=$(find . -maxdepth 3 \
+            -type f -iname "*.zip" \
+            ! -path "./.git/*" \
+            | head -1)
+
+          if [ -n "$ZIP" ]; then
+            echo "Found ZIP: $ZIP"
+            unzip -o "$ZIP" -d extracted
+          else
+            echo "No ZIP found; using repository files"
+            cp -a . extracted/
+          fi
+
+          echo "Extracted files:"
+          find extracted -maxdepth 4 -type f | head -80
+
+      # 5. 定位 Android Gradle 项目
+      - name: Locate Android Project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT=$(find extracted -type f \
+            \( -name "settings.gradle" -o \
+               -name "settings.gradle.kts" \) \
+            | head -1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: No Android Gradle project found"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PROJECT")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Project directory: $PROJECT_DIR"
+
+      # 6. 配置 Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      # 7. 编译 APK
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "Building Android APK..."
+
+          if [ -f gradlew ] && \
+             [ -f gradle/wrapper/gradle-wrapper.jar ]; then
+
+            chmod +x gradlew
+            ./gradlew assembleDebug \
+              --no-daemon \
+              --stacktrace
+
+          else
+            gradle assembleDebug \
+              --no-daemon \
+              --stacktrace
+          fi
+
+      # 8. 检查 APK
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p output
+
+          find "$PROJECT_DIR" \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -type f \
+            -exec cp {} output/ \;
+
+          echo "Generated APK files:"
+          ls -lh output/
+
+          if ! find output -name "*.apk" | grep -q .; then
+            echo "ERROR: APK not generated"
+            exit 1
+          fi
+
+      # 9. 上传 APK
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeaHackGlass-Android-APK
+          path: output/*.apk
+          if-no-files-found: error
+          retention-days: 30
